@@ -11,7 +11,14 @@ import random
 from pathlib import Path
 import cv2
 import numpy as np
+import yaml 
 
+
+def load_class_names(dataset_dir):
+    yaml_path = Path(dataset_dir) / "data.yaml"
+    with open(yaml_path, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    return list(data["names"])
 
 def draw_yolo_bboxes(img_path, label_path, class_names):
     img = cv2.imread(str(img_path))
@@ -62,7 +69,7 @@ def main():
     images = sorted(img_dir.glob("*.jpg"))
     random.shuffle(images)
 
-    class_names = ["mannequin", "tent"]
+    class_names = load_class_names(args.dataset)   # zamiast hardkodowanej listy
     saved = 0
 
     for img_path in images[:args.num]:
