@@ -196,6 +196,8 @@ def procedural_background(w, h, rng):
 def get_background(bg_files, w, h, rng):
     if bg_files:
         img = cv2.imread(str(rng.choice(bg_files)))
+        if img is None:
+            return procedural_background(w, h, rng)
         if img is not None:
             bh, bw = img.shape[:2]
             s = max(w / bw, h / bh)
@@ -213,6 +215,14 @@ def place_board(canvas, board, cov, symbols, poly, rng, args, boxes):
         f = rng.uniform(args.min_scale, args.max_scale)
         src, dst = make_quad(tw, th, w, h, rng, f, args.max_rot, args.persp)
         M = cv2.getPerspectiveTransform(src, dst)
+
+        panel_w = cv2.warpPerspective(cov, M, (w, h), flags=cv2.INTER_NEAREST, borderValue=0)
+        pys, pxs = np.nonzero(panel_w > 0)
+        if len(pxs) < 30: continue
+        px0, px1, py0, py1 = pxs.min(), pxs.max(), pys.min(), pys.max()
+        if px0 < 0 or py0 < 0 or px1 >= w or py1 >= h: continue
+        panel_rect = (int(px0), int(py0), int(px1) + 1, int(py1) + 1)
+
         rects, ok = [], True
         for _, m in symbols:
             sw = cv2.warpPerspective(m, M, (w, h), borderValue=0)
@@ -222,10 +232,11 @@ def place_board(canvas, board, cov, symbols, poly, rng, args, boxes):
             if x0 < 0 or y0 < 0 or x1 >= w or y1 >= h or x1 - x0 < 6 or y1 - y0 < 6: ok = False; break
             rects.append((int(x0), int(y0), int(x1) + 1, int(y1) + 1))
         if not ok: continue
-        if any(iou(r, b) > 0 for r in rects for b in boxes): continue
+        if any(iou(panel_rect, b) > 0 for b in boxes): continue
         break
     else:
         return None
+
     dst_poly = cv2.perspectiveTransform(poly.reshape(1, -1, 2).astype(np.float32), M)[0]
     draw_shadow(canvas, dst_poly, rng)
     b = (board.astype(np.float32) * rng.uniform(0.80, 1.0) + rng.uniform(-12, 4)).clip(0, 255).astype(np.uint8)
@@ -233,7 +244,7 @@ def place_board(canvas, board, cov, symbols, poly, rng, args, boxes):
     warped = cv2.warpPerspective(b, M, (w, h), borderValue=(255, 255, 255))
     panel  = cv2.warpPerspective(cov, M, (w, h), borderValue=0)
     blend(canvas, warped, panel)
-    return [(cls, r) for (cls, _), r in zip(symbols, rects)]
+    return panel_rect, [(cls, r) for (cls, _), r in zip(symbols, rects)]
 
 # ------------------------------------------------------------- przeszkadzacze
 def add_distractors(canvas, rng, args, d_files):
@@ -318,6 +329,7 @@ def main():
     ap.add_argument("--digits", default="0123456789", help="klasy cyfr (renderowane fontem)")
     ap.add_argument("--train-ratio", type=float, default=0.9)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--mode", choices=["mixed", "digits", "images"], default="mixed")
     args = ap.parse_args()
     rng = np.random.default_rng(args.seed)
 
@@ -327,7 +339,7 @@ def main():
         stems = [os.path.splitext(f)[0] for f in sorted(os.listdir(args.targets_dir))
                  if f.lower().endswith((".png", ".jpg", ".jpeg"))]
         object_classes = [s for s in stems if s not in digit_classes]
-    classes = digit_classes + object_classes
+    classes = digit_classes + object_classes + ["panel", "empty"]
     if not classes:
         raise SystemExit("Brak klas: dodaj sylwetki do --targets-dir i/lub --digits.")
     print(f"Klasy ({len(classes)}):")
@@ -346,7 +358,12 @@ def main():
     for i in range(args.num_images):
         canvas = get_background(bg_files, args.img_w, args.img_h, rng)
         add_distractors(canvas, rng, args, d_files)
-        scene_digits = bool(digit_classes) and (not object_classes or rng.random() < 0.5)
+        if args.mode == "digits":
+            scene_digits = True
+        elif args.mode == "images":
+            scene_digits = False
+        else:
+            scene_digits = bool(digit_classes) and (not object_classes or rng.random() < 0.5)
         boxes, lines = [], []
         for _ in range(int(rng.integers(1, args.max_targets + 1))):
             color = area_color(rng)                    # A/B per kołek
@@ -356,10 +373,19 @@ def main():
                 board, cov, symbols, poly = compose_image_board(str(rng.choice(object_classes)), targets, color, rng, args.arrow_rot)
             placed = place_board(canvas, board, cov, symbols, poly, rng, args, boxes)
             if not placed: continue
-            for cls, (x0, y0, x1, y1) in placed:
-                boxes.append((x0, y0, x1, y1))
-                lines.append(f"{classes.index(cls)} {(x0+x1)/2/args.img_w:.6f} {(y0+y1)/2/args.img_h:.6f} "
-                             f"{(x1-x0)/args.img_w:.6f} {(y1-y0)/args.img_h:.6f}")
+            panel_rect, sym_rects = placed
+            boxes.append(panel_rect)
+            px0, py0, px1, py1 = panel_rect
+            lines.append(f"{classes.index('panel')} {(px0+px1)/2/args.img_w:.6f} {(py0+py1)/2/args.img_h:.6f} "
+                        f"{(px1-px0)/args.img_w:.6f} {(py1-py0)/args.img_h:.6f}")
+            if sym_rects:
+                for cls, (x0, y0, x1, y1) in sym_rects:
+                    boxes.append((x0, y0, x1, y1))
+                    lines.append(f"{classes.index(cls)} {(x0+x1)/2/args.img_w:.6f} {(y0+y1)/2/args.img_h:.6f} "
+                                f"{(x1-x0)/args.img_w:.6f} {(y1-y0)/args.img_h:.6f}")
+            else:
+                lines.append(f"{classes.index('empty')} {(px0+px1)/2/args.img_w:.6f} {(py0+py1)/2/args.img_h:.6f} "
+                            f"{(px1-px0)/args.img_w:.6f} {(py1-py0)/args.img_h:.6f}")
         canvas = augment_final(canvas, rng)
         split = "train" if rng.random() < args.train_ratio else "val"
         cv2.imwrite(os.path.join(args.out_dir, "images", split, f"{i:06d}.jpg"), canvas, [cv2.IMWRITE_JPEG_QUALITY, 95])
